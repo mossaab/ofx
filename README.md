@@ -1,15 +1,33 @@
 # ofx
 
-A command-line console for **OpenFox**: inspect, diagnose and act on sessions without
-going through the web UI.
+A command-line console for **OpenFox**: inspect, diagnose, maintain and act on sessions
+without going through the web UI.
 
 `ofx` reads OpenFox's SQLite event log directly (read-only), and uses OpenFox's own HTTP
-API for anything that writes. It exists because a runaway session can make the UI
-unusable — and that is exactly when you need a tool that does not depend on the UI.
+API for anything that writes. Nothing about it is specific to one incident or one
+instance: it is the operator console for any OpenFox installation, and it keeps working
+when the web UI does not — a runaway session, a stalled state load, an unreachable API.
+
+## What it is for
+
+| Need | Commands |
+|---|---|
+| Health check, on a terminal or from cron | `status` (informational), `diagnose` / `watch` — exit `0`/`1`/`2` = ok/warn/critical |
+| Session inventory: which session holds what | `list`, `list --all` |
+| Explain *where* the time and the megabytes go | `inspect`, `plan` |
+| Steer a session without the UI | `stop`, `pause`, `resume`, `continue` |
+| Create, remove, archive, migrate a session | `new`, `rm`, `export`, `import` |
+| Database care: coherent backup, offline VACUUM | `backup`, `vacuum` |
+| Service lifecycle and logs | `service start\|stop\|restart\|status\|install\|upgrade`, `logs [-f]` |
+| Keep the numbers | redirect any command to a file — see *Your own reports and diagnostics* |
+
+Every command is a plain stdout writer with a documented exit code, and all the read-only
+ones need no credentials, so `ofx` composes with your shell, your cron and your monitoring
+instead of replacing them.
 
 ---
 
-## Why this exists
+## Why the event log gets out of hand
 
 OpenFox stores every session as an append-only event log in SQLite. Two design
 properties make that log grow far faster than the work it describes:
@@ -36,7 +54,11 @@ Measured on a real incident (OpenFox 2.0.160, one session):
 | `tool.preparing` events for 243 real tool calls | **59,913** — a **864×** inflation, 203 MB of the 210 MB |
 | Fragments written for a **single** tool call | **6,473** — 84 MB stored where 28 KB would do |
 
-`ofx` was built to make that visible, to prove it with numbers, and to act on it safely.
+These numbers are why `ofx` reports **lag** — the bytes accumulated since the last
+snapshot — rather than counting events, and why `inspect` measures the real state-load
+cost instead of inferring it. The measurements come from one instance (see *Background*);
+the mechanism is the same on every OpenFox installation, and it is what the tool is built
+to make visible, prove with numbers, and act on safely.
 
 ---
 
@@ -244,10 +266,14 @@ it prints explain a 210 MB regression that was invisible from inside the UI.
 
 ## Background
 
-This tool is the product of a post-mortem on a real incident: an OpenFox instance pinned
-a CPU core for 9h30 and became unstoppable from its own UI. The numbers in *Why this
-exists* were measured on that instance; `ofx inspect` and `ofx diagnose` are what made
-them visible in the first place.
+`ofx` was written while working a real incident — an OpenFox instance pinned a CPU core
+for 9h30 and became unstoppable from its own UI. That incident shaped the tool's
+non-negotiables (read-only by default, pre-checks before expensive writes, no compaction
+of its own, no write that bypasses OpenFox's in-memory caches), but it is **not the
+scope**: the same commands are what you use to keep an instance healthy, to size it, to
+archive or migrate a session, and to answer "why is this disk filling up". The numbers in
+*Why the event log gets out of hand* were measured on that instance; `ofx inspect` and
+`ofx diagnose` are what made them visible in the first place.
 
 The full analysis — incident narrative, bug report, prevention plan, maintenance runbook
 and the scripts that regenerate those numbers — is **not part of this repository**. It

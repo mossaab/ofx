@@ -2,9 +2,13 @@
 
 ## 1. Project Overview
 
-`ofx` is a **command-line console for OpenFox**: it inspects, diagnoses and acts on
-OpenFox sessions without going through the web UI. It exists because a runaway session
-can make the UI unusable — exactly when you need a tool that does not depend on the UI.
+`ofx` is a **command-line console for OpenFox**: it inspects, diagnoses, maintains and
+acts on OpenFox sessions without going through the web UI. It is a general-purpose
+operator tool — monitoring, session inventory and cost analysis, archival/migration,
+database maintenance, service lifecycle — and **not** a one-off answer to the incident
+that triggered it. Do not narrow its scope to that incident: no command, no doc and no
+error message may assume a specific instance, project or failure mode. UI independence is
+a property of the tool, not its purpose — it matters when the UI is slow, dead or absent.
 
 Two-way data access:
 
