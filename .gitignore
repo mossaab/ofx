@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# NEVER COMMIT RUNTIME DATA OR SECRETS
+# ---------------------------------------------------------------------------
+# A full SQLite backup of OpenFox's sessions.db contains the entire event log of
+# every session, AND the `settings` table — which holds provider API keys in
+# clear text (e.g. search.tavilyApiKey). One `git add -A` on such a file
+# publishes every key you own.
+backup/
+*.bak
+*.bak-*
+*.pre-de-dup.bak
+*.sha256
+
+# OpenFox database and its side files
+sessions.db
+sessions.db-wal
+sessions.db-shm
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Session exports (may contain prompts, paths, code from private projects)
+*.openfox-session.json
+
+# Credentials
+token
+*.token
+.env
+.env.*
+!.env.example
+credentials*
+*.pem
+*.key
+
+# Editor / OS noise
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Documentation folder — deliberately NOT committed (excluded on request).
+# The files stay on disk (docs/README.md, specs, incident analysis, runbook).
+docs/*

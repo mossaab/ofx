@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+#
+# ofx — OpenFox command console (launcher).
+#
+# Finds the node interpreter running OpenFox, then delegates to ofx.cjs.
+# This is essential: better-sqlite3 is a native module compiled for a specific ABI.
+# Using any other node than OpenFox's would make the require() fail.
+#
+# Search order for the right node:
+#   1. OPENFOX_CTL_NODE (explicit override)
+#   2. the interpreter of the running OpenFox process (/proc/<pid>/cmdline)
+#   3. node on the PATH
+#   4. ~/.local/share/pi-node/current/bin/node
+#
+# Usage: see ofx --help
+#
+set -uo pipefail
+
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+IMPL="$DIR/ofx.cjs"
+
+if [[ ! -f "$IMPL" ]]; then
+  echo "ofx: implementation not found: $IMPL" >&2
+  exit 1
+fi
+
+find_node() {
+  # 1. explicit override
+  if [[ -n "${OPENFOX_CTL_NODE:-}" && -x "${OPENFOX_CTL_NODE}" ]]; then
+    echo "$OPENFOX_CTL_NODE"; return 0
+  fi
+
+  # 2. the OpenFox server's interpreter (the one with the largest RSS)
+  local best="" bestrss=0 p rss cand
+  while read -r p; do
+    [[ -r "/proc/$p/cmdline" ]] || continue
+    tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'bin/openfox' || continue
+    rss="$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null)"
+    if [[ -n "$rss" && "$rss" -gt "$bestrss" ]]; then bestrss="$rss"; best="$p"; fi
+  done < <(pgrep -f 'bin/openfox' 2>/dev/null)
+  if [[ -n "$best" && -r "/proc/$best/cmdline" ]]; then
+    cand="$(tr '\0' '\n' < "/proc/$best/cmdline" | head -1)"
+    [[ -x "$cand" ]] && { echo "$cand"; return 0; }
+  fi
+
+  # 3. node on the PATH
+  if command -v node >/dev/null 2>&1; then
+    command -v node; return 0
+  fi
+
+  # 4. node installed by pi
+  if [[ -x "$HOME/.local/share/pi-node/current/bin/node" ]]; then
+    echo "$HOME/.local/share/pi-node/current/bin/node"; return 0
+  fi
+
+  return 1
+}
+
+NODE_BIN="$(find_node)" || {
+  echo "ofx: no node interpreter found." >&2
+  echo "  Set OPENFOX_CTL_NODE=/path/to/node" >&2
+  exit 1
+}
+
+exec "$NODE_BIN" "$IMPL" "$@"
