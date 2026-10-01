@@ -245,15 +245,39 @@ it prints explain a 210 MB regression that was invisible from inside the UI.
 ## Background
 
 This tool is the product of a post-mortem on a real incident: an OpenFox instance pinned
-a CPU core for 9h30 and became unstoppable from its own UI.
+a CPU core for 9h30 and became unstoppable from its own UI. The numbers in *Why this
+exists* were measured on that instance; `ofx inspect` and `ofx diagnose` are what made
+them visible in the first place.
 
-The detailed analysis is in [`docs/`](docs/):
+The full analysis — incident narrative, bug report, prevention plan, maintenance runbook
+and the scripts that regenerate those numbers — is **not part of this repository**. It
+lives in `docs/`, which `.gitignore` excludes on purpose: it describes one specific
+instance (host metrics, session sizes, project names, operator notes), and it stays on
+the machine that produced it.
 
-- [`docs/README.md`](docs/README.md) — the incident narrative, before/after
-- [`docs/OPENFOX-BUG-REPORT.md`](docs/OPENFOX-BUG-REPORT.md) — root causes with query plans
-- [`docs/POURQUOI-ET-PREVENTION.md`](docs/POURQUOI-ET-PREVENTION.md) — the causal chain
-- [`docs/PROCEDURE-MAINTENANCE-OPENFOX.md`](docs/PROCEDURE-MAINTENANCE-OPENFOX.md) — operational runbook
-- [`docs/repro/`](docs/repro/) — scripts that regenerate the numbers quoted above
+## Your own reports and diagnostics
+
+This repository ships the **tool only** — no instance data, no logs, no reports. Anything
+you measure is yours, and the git-ignored `docs/` directory is the natural place to keep
+it:
+
+```bash
+mkdir -p docs
+ofx status               > docs/status-$(date +%F).txt
+ofx list                 > docs/sessions-$(date +%F).txt
+ofx inspect --hot --fast > docs/hot-session-$(date +%F).txt
+ofx diagnose             > docs/health-$(date +%F).txt
+ofx watch --samples 10 --interval 30 > docs/growth-$(date +%F).txt
+```
+
+Every command writes plain lines to stdout and gates its colors on `isatty`, so the
+output is safe to redirect to a file or to pipe into another tool.
+
+`ofx diagnose` doubles as a monitoring probe: exit **0** = healthy, **1** = a warning
+threshold is crossed, **2** = critical — `ofx diagnose >/dev/null; echo $?`.
+
+Because `docs/` is ignored, a report can never be committed by accident. That matters:
+a report quotes session titles, sizes and paths.
 
 ---
 

@@ -44,6 +44,8 @@ Thumbs.db
 # Logs
 *.log
 
-# Documentation folder — deliberately NOT committed (excluded on request).
-# The files stay on disk (docs/README.md, specs, incident analysis, runbook).
+# Local scratch — never published. Holds the incident analysis (docs/README.md, French),
+# the bug report, the specs, the runbook, and the reports/diagnostics generated locally
+# (`ofx diagnose` / `inspect` / `watch` > docs/...). The repository is shared with other
+# operators and ships the tool only; a report can quote session titles, sizes and paths.
 docs/*

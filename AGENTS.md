@@ -20,11 +20,14 @@ Tech stack:
   installed here.
 - **Bash** launcher + installer, `systemd`, `journalctl`, `/proc` — **Linux only**.
 - No test framework, no lint config, no TypeScript. Verification is by syntax checks,
-  a smoke test, and measurement scripts in `docs/repro/`.
+  a smoke test, and — on the machine that owns them — the measurement scripts kept in
+  `docs/repro/`.
 
-The project was born from a post-mortem (incident narrative and root causes are in
-`docs/`). Read `README.md` first — it documents the safety model and deliberate
-non-goals; changing behavior often requires updating that README.
+The project was born from a post-mortem. The incident narrative and root causes live in
+`docs/`, which is **deliberately git-ignored and never published** (see §2): it describes
+one specific instance (host metrics, session sizes, project names, operator notes). Read
+`README.md` first — it documents the safety model and deliberate non-goals; changing
+behavior often requires updating that README.
 
 ## 2. Directory Structure
 
@@ -39,11 +42,18 @@ openfox-session-watch.cjs  # live journal-growth monitor; delegated by `ofx watc
 openfox-backup.cjs     # coherent online backup (SQLite backup API); `ofx backup`.
 openfox-vacuum.cjs     # checkpoint WAL + VACUUM, server MUST be stopped; `ofx vacuum`.
 install.sh             # symlinks ofx onto PATH, smoke-tests with `ofx status`.
-docs/                  # incident analysis (README.md), bug report, prevention plan,
-                       #   maintenance runbook, specs, docs/repro/*.cjs measurement scripts.
-LICENSE, README.md     # MIT; README is the canonical product documentation (French,
-                       #   like docs/ — the scripts themselves speak English).
+LICENSE, README.md     # MIT; README is the canonical, published product documentation
+                       #   (English, like the code).
 ```
+
+That is the whole published tree. Everything else is **local, not published**: `docs/`
+holds the incident analysis (`README.md`, French), the bug report, the prevention plan,
+the maintenance runbook, the specs and the `docs/repro/*.cjs` measurement scripts, and it
+is matched by `docs/*` in `.gitignore`. The same directory is where an operator drops the
+reports and diagnostics they generate locally (`ofx diagnose`, `inspect`, `watch` — see
+the README section *Your own reports and diagnostics*). The repository is meant to be
+cloned by other operators for their own OpenFox instance, so **no instance-specific data,
+report, log or credential may land in it**.
 
 Each helper script is **self-contained on purpose** (they duplicate small helpers like
 `findHolders` and DB constants). Keep it that way: `ofx` delegates to them via
@@ -75,7 +85,8 @@ node openfox-session-watch.cjs --samples 3 --interval 5
 ./install.sh                 # symlinks into ~/.local/bin, runs `ofx status` smoke test
 ./install.sh --uninstall
 
-# Regenerate the incident numbers (read-only measurements):
+# Regenerate the incident numbers (read-only measurements). These scripts are local
+# only — they live in the git-ignored docs/repro/, so a fresh clone does not have them:
 node docs/repro/repro-measure-state-load.cjs
 node docs/repro/repro-explain-query-plans.cjs
 ```
@@ -99,15 +110,15 @@ better-sqlite3), `OPENFOX_HOST`/`OPENFOX_PORT` (API, default 127.0.0.1:10369),
 - **User-facing strings are English** (help texts, messages, column headers) in every
   script — `ofx.cjs`, the helper `.cjs`, the `ofx` launcher, `openfox-watchdog.sh` and
   `install.sh`. Keep new user-visible text in English. Comments are English too; the
-  French sources were translated, so the remaining French lives only in `README.md` and
-  `docs/` (see below), never in code.
+  French sources were translated, so the remaining French lives only in the local
+  (unpublished) `docs/`, never in code and never in `README.md`.
 - **Output units are English-style**: byte labels are `MB`/`GB`/`KB` (not `Mo`/`Go`/`Ko`)
   and numbers are formatted with `toLocaleString('en-US')` — including the thresholds
   shown next to `LAG_MB_WARN`/`LAG_MB_CRIT`. Keep this consistent when adding output.
-- **Two documentation languages**: `README.md` and `docs/` stay French, the code is
-  English. A command whose help text changes needs the `HELP` table (English) *and* the
-  README section (French) updated together — the README remains the canonical product
-  documentation.
+- **Documentation split**: `README.md` is the published, canonical product documentation
+  and it is English, like the code; only the local `docs/` (git-ignored) is French. A
+  command whose help text changes needs the `HELP` table *and* the README section updated
+  together.
 - Formatting: 2-space indent, single quotes, semicolons, trailing commas in multiline.
   No minification, no code golf — readability of the safety logic is the point.
 - Display helpers in `ofx.cjs`: `ok()`, `ko()`, `warn()`, `info()`, `dim()`, `head()`,
@@ -221,8 +232,12 @@ better-sqlite3), `OPENFOX_HOST`/`OPENFOX_PORT` (API, default 127.0.0.1:10369),
   keep destructive operations non-scriptable where intended (`service install/upgrade`),
   while `--yes` is allowed where it already exists (`compact`, `rm`, `vacuum`).
 - **Documentation drift**: README.md documents every command, threshold and deliberate
-  non-goal; the HELP table in ofx.cjs mirrors it. Update both (plus docs/ when incident
-  facts change) with any behavior change.
+  non-goal; the HELP table in ofx.cjs mirrors it. Update both (plus the local `docs/` when
+  incident facts change) with any behavior change.
+- **`docs/` never ships**: `.gitignore` excludes it via `docs/*`, because the repository
+  is opened to other operators and `docs/` describes one instance — plus whatever reports
+  each user generates there. Never `git add -f docs/`, never commit a report, and never
+  reference a `docs/…` file in the published README as if it came with the repository.
 - **The DB contains provider API keys** (`settings` table). `backup/`, `*.db*` and
   `*.openfox-session.json` are git-ignored for a reason — never commit them, never log the
   `settings` contents.
