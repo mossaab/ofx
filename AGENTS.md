@@ -43,6 +43,7 @@ openfox-watchdog.sh    # health report + thresholds; delegated by `ofx diagnose`
                        #   Single source of truth for OPENFOX_WD_* thresholds.
 openfox-watchdog-db.cjs# DB metrics helper called by the watchdog (KEY=VALUE stdout).
 openfox-session-watch.cjs  # live journal-growth monitor; delegated by `ofx watch`.
+openfox-session-live.cjs   # live dashboard of running sessions; delegated by `ofx live`.
 openfox-backup.cjs     # coherent online backup (SQLite backup API); `ofx backup`.
 openfox-vacuum.cjs     # checkpoint WAL + VACUUM, server MUST be stopped; `ofx vacuum`.
 install.sh             # symlinks ofx onto PATH, smoke-tests with `ofx status`.
@@ -71,7 +72,7 @@ There is no build step and no package manager. Run everything directly with node
 ```bash
 # Syntax check (the "lint" + "typecheck" of this repo):
 node --check ofx.cjs openfox-backup.cjs openfox-session-watch.cjs \
-  openfox-vacuum.cjs openfox-watchdog-db.cjs
+  openfox-session-live.cjs openfox-vacuum.cjs openfox-watchdog-db.cjs
 bash -n ofx install.sh openfox-watchdog.sh
 
 # Run the CLI (single "file"/command at a time):
@@ -84,6 +85,7 @@ bash -n ofx install.sh openfox-watchdog.sh
 node openfox-backup.cjs --out /tmp/bk --keep 1
 node openfox-vacuum.cjs --dry-run
 node openfox-session-watch.cjs --samples 3 --interval 5
+node openfox-session-live.cjs --once --min 0
 
 # Install / uninstall on PATH:
 ./install.sh                 # symlinks into ~/.local/bin, runs `ofx status` smoke test
@@ -186,8 +188,8 @@ better-sqlite3), `OPENFOX_HOST`/`OPENFOX_PORT` (API, default 127.0.0.1:10369),
   responds 201 on import success.
 - **Delegation**: `runSibling(name, args)` executes helper scripts from `SCRIPT_DIR`
   (`.sh` with bash, `.cjs` with the current interpreter) and propagates their exit code.
-  `watch`/`diagnose`/`backup`/`vacuum` are thin wrappers — change behavior in the helper,
-  not in `ofx.cjs`.
+  `watch`/`live`/`diagnose`/`backup`/`vacuum` are thin wrappers — change behavior in the
+  helper, not in `ofx.cjs`.
 - **Service lifecycle**: `svcDo()` wraps `sudo systemctl`; restart is deliberately
   `stop + sleep 1 + start` (the 1 s delay releases port 10369 and avoids documented
   EADDRINUSE). Destructive commands (`service install`, `service upgrade`) use
@@ -232,6 +234,15 @@ better-sqlite3), `OPENFOX_HOST`/`OPENFOX_PORT` (API, default 127.0.0.1:10369),
   relax these; do not print tokens in full (use `fingerprint()`).
 - **N+1 queries** on the events table turn reads into stalls (that was half of the incident).
   New SQL must be set-based and select only needed columns.
+- **Live sampling** (`openfox-session-live.cjs`) is a loop: keep the cost per sample flat.
+  Measure the lag once then update it incrementally, parse `chat.done` only for new seqs,
+  never parse a `turn.snapshot` (0.5–1 MB) inside the loop, and open + close the database
+  on every sample so a long-running dashboard never pins a WAL read snapshot.
+- **Token totals are not stored**: `sessions.total_tokens_used`, `total_tool_calls` and
+  `iteration_count` are 0 on every session, and `cleanupOldEvents()` purges the journal of
+  a finished session. Per-turn usage only exists in `chat.done.stats` while it is still in
+  the journal; `context.state` (kept by the purge) and `turn.snapshot.contextState` carry
+  the context size. Show `-` rather than inventing a total.
 - **Exit codes and TTY output**: preserve the 0/1/2 contract, keep colors TTY-gated, and
   keep destructive operations non-scriptable where intended (`service install/upgrade`),
   while `--yes` is allowed where it already exists (`compact`, `rm`, `vacuum`).

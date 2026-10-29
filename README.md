@@ -14,6 +14,7 @@ when the web UI does not — a runaway session, a stalled state load, an unreach
 |---|---|
 | Health check, on a terminal or from cron | `status` (informational), `diagnose` / `watch` — exit `0`/`1`/`2` = ok/warn/critical |
 | Session inventory: which session holds what | `list`, `list --all` |
+| See what is running right now, and where it stands | `live` |
 | Explain *where* the time and the megabytes go | `inspect`, `plan` |
 | Steer a session without the UI | `stop`, `pause`, `resume`, `continue` |
 | Create, remove, archive, migrate a session | `new`, `rm`, `export`, `import` |
@@ -130,10 +131,38 @@ ofx compact --hot --apply --restart
 | `list [--all]` | sessions with event count, payload size, snapshot count, lag |
 | `inspect <id\|--hot> [--fast]` | per-type breakdown, snapshot positions, real state-load cost |
 | `plan <id\|--hot>` | dry-run of a consolidation: eligibility, what survives, what is lost |
+| `live [--interval N] [--min N]` | live dashboard of running sessions: step, elapsed time, token speed, context, lag |
 | `watch` | live journal growth rate |
 | `diagnose` | full health report with thresholds, exit 0/1/2 |
 | `backup [--out DIR] [--keep N]` | coherent DB backup via SQLite's online backup API |
 | `vacuum [--dry-run] [--yes]` | checkpoint + VACUUM (**server must be stopped**) |
+
+### Live dashboard: `ofx live`
+
+`ofx live` draws the sessions that are running right now — one card each: workflow
+step, elapsed time, context occupancy, token speed, tokens used and snapshot lag —
+and, when fewer than five are active, fills the screen with the most recently
+finished sessions (duration, final step, final context size, outcome).
+
+```bash
+ofx live                 # every 2 s, until Ctrl+C
+ofx live --interval 1    # faster samples
+ofx live --min 0         # running sessions only
+ofx live --once          # one screen, for a log
+```
+
+Everything is read-only, and the database connection is **opened and closed on every
+sample**: a dashboard left open for hours never pins a WAL read snapshot, so it never
+delays a checkpoint. A sample was measured at **2–10 ms** on a 1.4 GB database — the
+lag is accounted incrementally and `turn.snapshot` payloads are never parsed in the
+loop.
+
+Two limits come from OpenFox's own data model, and `ofx live` states them instead of
+inventing numbers: `sessions.total_tokens_used` is not maintained (0 on every
+session) and `cleanupOldEvents()` purges the journal of a finished session. Token
+totals for sessions that already ended are therefore shown as `-`. What survives is
+the final context size (`turn.snapshot.contextState`), the workflow step, the
+duration and the outcome.
 
 ### Actions — via the HTTP API, token required
 
@@ -212,9 +241,9 @@ and orchestrates the restart instead.
 
 Three independent tiers, in increasing order of consequence:
 
-**1. Read-only.** `list`, `inspect`, `plan`, `status`, `backup`, `watch`, `diagnose`
-open the database with `readonly: true` **and** `PRAGMA query_only = true`. No writes,
-no locks held, no `kill`.
+**1. Read-only.** `list`, `inspect`, `plan`, `status`, `backup`, `watch`, `live`,
+`diagnose` open the database with `readonly: true` **and** `PRAGMA query_only = true`.
+No writes, no locks held, no `kill`.
 
 **2. Writes through the API.** `stop`, `pause`, `resume`, `continue`, `new`, `rm`,
 `export`. OpenFox keeps `snapshotCache` and `promptsCache` **in memory** and only
@@ -292,6 +321,7 @@ mkdir -p docs
 ofx status               > docs/status-$(date +%F).txt
 ofx list                 > docs/sessions-$(date +%F).txt
 ofx inspect --hot --fast > docs/hot-session-$(date +%F).txt
+ofx live --once          > docs/live-$(date +%F-%H%M).txt
 ofx diagnose             > docs/health-$(date +%F).txt
 ofx watch --samples 10 --interval 30 > docs/growth-$(date +%F).txt
 ```

@@ -45,6 +45,7 @@
 //   ofx inspect <id|--hot>    session detail [--fast]
 //   ofx plan <id|--hot>       consolidation impact (dry-run, never writes)
 //   ofx watch [--interval N]  live growth (delegated)
+//   ofx live [--interval N]   live session dashboard (delegated)
 //   ofx diagnose              health report (delegated, watchdog thresholds)
 //   ofx backup [--out DIR]    coherent backup (delegated)
 //   ofx stop|pause|resume|continue <id>     action via the API
@@ -2505,7 +2506,7 @@ async function cmdImport(argv) {
 // ---------------------------------------------------------------------------
 // Per-command help
 // ---------------------------------------------------------------------------
-const ALIASES = { ls: 'list', show: 'inspect' };
+const ALIASES = { ls: 'list', show: 'inspect', top: 'live' };
 
 const HELP = {
   status: {
@@ -2632,6 +2633,38 @@ const HELP = {
     notes: [
       'Delegated to openfox-session-watch.cjs (single source).',
       'Exit code: 0 never exceeded, 1 warning threshold, 2 critical threshold.',
+    ],
+  },
+
+  live: {
+    resume: 'live dashboard: running sessions, step, tokens, lag',
+    usage: ['ofx live [--interval N] [--min N] [--samples N] [--once] [--no-color]'],
+    desc: [
+      'Live screen of the sessions that are running right now: workflow step,',
+      'elapsed time, context occupancy, token speed, tokens used, snapshot lag.',
+      '',
+      'When fewer than --min sessions are active, the most recently finished',
+      'ones fill the gap with their duration, final step, final context size',
+      'and outcome.',
+      '',
+      'READ-ONLY. The database is opened and closed on every sample, so a',
+      'dashboard left open never pins a WAL read snapshot. A redirected output',
+      '(or --once) prints one timestamped block instead of an animated screen.',
+    ],
+    options: [
+      ['--interval N', 'seconds between two samples (default 2, minimum 1)'],
+      ['--min N', 'fill up to N active sessions with finished ones (default 5, 0 disables)'],
+      ['--samples N', 'stop after N samples'],
+      ['--once', 'one sample, then exit'],
+      ['--no-color', 'disable colors (also honors NO_COLOR and a non-TTY stdout)'],
+    ],
+    examples: ['ofx live', 'ofx live --once', 'ofx live --interval 1 --min 0'],
+    notes: [
+      'Delegated to openfox-session-live.cjs (single source).',
+      'Token totals of finished sessions are usually unavailable: OpenFox does',
+      'not maintain sessions.total_tokens_used, and cleanupOldEvents() purges',
+      'the journal of a finished session.',
+      'Exit code: 0 on Ctrl+C, 1 usage / missing database, 2 failure.',
     ],
   },
 
@@ -3110,6 +3143,7 @@ function usage() {
     inspect <id|--hot> [--fast]  session detail
     plan <id|--hot>            consolidation impact (dry-run)
     watch [--interval N]       live growth                ${C.d}(delegated)${C.x}
+    live [--interval N]        live session dashboard     ${C.d}(delegated)${C.x}
     diagnose                   health report              ${C.d}(delegated)${C.x}
     backup [--out DIR]         coherent backup            ${C.d}(delegated)${C.x}
     vacuum [--dry-run]         offline VACUUM             ${C.d}(delegated)${C.x}
@@ -3204,6 +3238,8 @@ async function main() {
       return cmdPlan(argv);
     case 'watch':
       return runSibling('openfox-session-watch.cjs', argv);
+    case 'live':
+      return runSibling('openfox-session-live.cjs', argv);
     case 'diagnose':
       return runSibling('openfox-watchdog.sh', argv);
     case 'backup':
