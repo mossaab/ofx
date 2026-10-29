@@ -243,6 +243,12 @@ better-sqlite3), `OPENFOX_HOST`/`OPENFOX_PORT` (API, default 127.0.0.1:10369),
   a finished session. Per-turn usage only exists in `chat.done.stats` while it is still in
   the journal; `context.state` (kept by the purge) and `turn.snapshot.contextState` carry
   the context size. Show `-` rather than inventing a total.
+- **Acceptance criteria and review findings are `metadata.set`**, not dedicated event
+  types: keys `criteria` and `review_findings`, each event carrying the WHOLE list (so the
+  last event per key holds the current state), and they survive the purge because
+  `metadata.set` is in `CLEANUP_KEEP_TYPES`. Vocabulary: `pending` → `completed` →
+  `passed`/`failed`, and `open` → `resolved`/`dismissed`. Map an unknown status to `?`
+  instead of counting it as done.
 - **Exit codes and TTY output**: preserve the 0/1/2 contract, keep colors TTY-gated, and
   keep destructive operations non-scriptable where intended (`service install/upgrade`),
   while `--yes` is allowed where it already exists (`compact`, `rm`, `vacuum`).

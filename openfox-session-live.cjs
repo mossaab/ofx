@@ -28,12 +28,16 @@
 //   journal of a finished session. Token totals of finished sessions are therefore
 //   NOT recoverable and are shown as "-". What does survive: the workflow step, the
 //   duration, the final context size (turn.snapshot.contextState) and the outcome.
+//   Acceptance criteria and review findings are metadata.set events (keys "criteria"
+//   and "review_findings"), rewritten as a whole list on each change and kept by the
+//   purge, so their per-item progress is visible for running and finished sessions.
 //
 // USAGE
 //   openfox-session-live.cjs                     # every 2 s until Ctrl+C
 //   openfox-session-live.cjs --interval 1 --min 0
 //   openfox-session-live.cjs --samples 5         # stops after 5 samples (for a log)
 //   openfox-session-live.cjs --once              # one screen, then exit
+//   openfox-session-live.cjs --items             # expand criteria / findings
 //
 // When stdout is not a TTY (redirected to a file), the colors are dropped, no
 // escape sequence is emitted, one timestamped block is printed per sample and the
@@ -62,6 +66,24 @@ const LAG_MB_CRIT = Number(process.env.OPENFOX_WD_LAG_MB_CRIT || 100);
 // A session waiting for a human: the very last event is one of these.
 const WAITING_TYPES = ['chat.ask_user', 'path.confirmation_pending'];
 
+// Acceptance criteria and review findings are not dedicated event types: OpenFox
+// stores them in metadata.set with these two keys, rewriting the whole list every
+// time one item changes its status. Their vocabulary, observed in 2.0.161:
+//   criteria        pending -> completed (implemented) -> passed | failed
+//   review_findings open    -> resolved | dismissed
+const CHECK_KEYS = ['criteria', 'review_findings'];
+const CHECK_STATUS = {
+  pending: { glyph: '\u00b7', color: 'd', word: 'pending' },
+  completed: { glyph: '\u25d0', color: 'c', word: 'in progress' },
+  passed: { glyph: '\u2713', color: 'g', word: 'passed' },
+  failed: { glyph: '\u2717', color: 'r', word: 'failed' },
+  open: { glyph: '\u25cb', color: 'y', word: 'open' },
+  resolved: { glyph: '\u2713', color: 'g', word: 'resolved' },
+  dismissed: { glyph: '\u2013', color: 'd', word: 'dismissed' },
+};
+const CHECK_TERMINAL = ['passed', 'failed', 'resolved', 'dismissed'];
+const MAX_ITEMS = 14; // per list, then "… +N more"
+
 // Event types whose last occurrence is cheap to read (small payloads only).
 const DETAIL_TYPES = [
   'context.state',
@@ -81,7 +103,7 @@ const MAX_WIDTH = 140;
 // Options
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2);
-const opt = { interval: 2, min: 5, samples: 0, color: true };
+const opt = { interval: 2, min: 5, samples: 0, color: true, items: false };
 
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -89,13 +111,16 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--min') opt.min = Number(argv[++i]);
   else if (a === '--samples') opt.samples = Number(argv[++i]);
   else if (a === '--once') opt.samples = 1;
+  else if (a === '--items') opt.items = true;
   else if (a === '--no-color') opt.color = false;
   else if (a === '--help' || a === '-h') {
     printHelp();
     process.exit(0);
   } else {
     console.error(`unknown option: ${a}`);
-    console.error('usage: openfox-session-live.cjs [--interval N] [--min N] [--samples N] [--once] [--no-color]');
+    console.error(
+      'usage: openfox-session-live.cjs [--interval N] [--min N] [--samples N] [--once] [--items] [--no-color]'
+    );
     process.exit(1);
   }
 }
@@ -207,7 +232,7 @@ function printHelp() {
   openfox-session-live — live dashboard of OpenFox sessions
 
   USAGE
-    openfox-session-live.cjs [--interval N] [--min N] [--samples N] [--once] [--no-color]
+    openfox-session-live.cjs [--interval N] [--min N] [--samples N] [--once] [--items] [--no-color]
 
   OPTIONS
     --interval N   seconds between two samples (default 2, minimum 1)
@@ -215,6 +240,8 @@ function printHelp() {
                    ones (default 5, 0 disables the historical block)
     --samples N    stop after N samples (0 = until Ctrl+C)
     --once         one sample, then exit
+    --items        list the acceptance criteria and review findings, one per
+                   line, instead of only their progress summary
     --no-color     disable colors (also honors NO_COLOR and a non-TTY stdout)
 
   READ-ONLY. The database is opened readonly + query_only and closed again after
@@ -295,6 +322,8 @@ function memo(id) {
       tok: null, // incremental chat.done accumulator
       spark: [],
       ctxCache: null, // { seq, cur, max } recovered from a turn.snapshot
+      metaSeq: null, // max seq of metadata.set seen (criteria / review findings)
+      checks: null, // parsed acceptance criteria + review findings
     };
     cache.set(id, m);
   }
@@ -467,6 +496,72 @@ function snapshotContext(db, id, snapSeq) {
   return m.ctxCache;
 }
 
+// Maximum seq of metadata.set per session: index-only, no payload is read.
+function lastMetadata(db, ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const ph = ids.map(() => '?').join(',');
+  for (const r of db
+    .prepare(
+      `SELECT session_id, MAX(seq) AS mx FROM events
+        WHERE session_id IN (${ph}) AND event_type = 'metadata.set' GROUP BY session_id`
+    )
+    .all(...ids)) {
+    out.set(r.session_id, r.mx);
+  }
+  return out;
+}
+
+// Acceptance criteria and review findings, re-read only when a metadata.set was
+// written since the previous sample (the whole list is rewritten each time).
+function checksOf(db, id, metaSeq) {
+  const m = memo(id);
+  if (m.checks && m.metaSeq === metaSeq) return m.checks;
+  m.metaSeq = metaSeq || 0;
+  const out = {};
+  if (metaSeq) {
+    const rows = db
+      .prepare(
+        `SELECT payload FROM (
+           SELECT payload, ROW_NUMBER() OVER (
+                    PARTITION BY json_extract(payload, '$.key') ORDER BY seq DESC) AS rn
+             FROM events WHERE session_id = ? AND event_type = 'metadata.set'
+         ) WHERE rn = 1`
+      )
+      .all(id);
+    for (const r of rows) {
+      const list = parseCheckList(r.payload);
+      if (list) out[list.key] = list;
+    }
+  }
+  m.checks = out;
+  return out;
+}
+
+function parseCheckList(payload) {
+  let obj;
+  try {
+    obj = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  const key = String((obj && obj.key) || '');
+  if (!CHECK_KEYS.includes(key)) return null;
+  const entries = Array.isArray(obj && obj.entries) ? obj.entries : [];
+  if (!entries.length) return null;
+  const items = entries.map((e) => ({
+    id: String(e && e.id != null ? e.id : '?'),
+    description: String((e && e.description) || '')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    status: String((e && e.status) || '?'),
+  }));
+  const counts = {};
+  for (const it of items) counts[it.status] = (counts[it.status] || 0) + 1;
+  const done = CHECK_TERMINAL.reduce((a, st) => a + (counts[st] || 0), 0);
+  return { key, items, counts, total: items.length, done };
+}
+
 // One sample: returns the model the renderer needs. Mutates the per-session memo.
 function sample(state) {
   const db = openDb();
@@ -522,7 +617,8 @@ function sample(state) {
     const details = lastDetails(db, shownIds);
     const snapshots = lastSnapshots(db, shownIds);
     const workflows = lastWorkflows(db, shownIds);
-    const shared = { now, last, details, snapshots, workflows, tick: state.tick };
+    const meta = lastMetadata(db, shownIds);
+    const shared = { now, last, details, snapshots, workflows, meta, tick: state.tick };
 
     // A finished session whose max seq moved is not finished any more: reset memos
     // that would otherwise keep a stale token total.
@@ -678,6 +774,7 @@ function buildSession(db, s, shared, kind) {
     duration,
     idleMs,
     ctx,
+    checks: checksOf(db, s.id, shared.meta.get(s.id) || 0),
     live: kind === 'history' ? 'finished' : null,
   };
 
@@ -887,6 +984,8 @@ function render(model) {
 
   // --- footer -------------------------------------------------------------
   const foot = [`lag warn ${LAG_MB_WARN} MB \u00b7 crit ${LAG_MB_CRIT} MB`, 'context 70/85%'];
+  const anyChecks = model.history.some((s) => s.checks && (s.checks.criteria || s.checks.review_findings));
+  if (anyChecks && historyCols(W).some((c) => c[0] === 'checks')) foot.push('checks: criteria \u00b7 findings');
   if (IS_TTY) foot.push('Ctrl+C to quit');
   while (foot.length > 1 && foot.join('   \u00b7   ').length > W - 4) foot.pop();
   lines.push('');
@@ -955,6 +1054,19 @@ function renderCard(s, W) {
     out.push(rail + '    ' + C.d + pad('context', 10) + '\u2014' + C.x);
   }
 
+  // acceptance criteria / review findings (one summary line each, or the full
+  // list with --items)
+  if (s.checks) {
+    for (const [key, label] of [
+      ['criteria', 'criteria'],
+      ['review_findings', 'review'],
+    ]) {
+      const list = s.checks[key];
+      if (!list) continue;
+      out.push(...renderChecks(rail, label, list, inner));
+    }
+  }
+
   // speed
   const speedLast = s.speedLast != null ? s.speedLast.toFixed(1) + ' tok/s' : null;
   // A zero here means "no token emitted during this window" (tool call, pause):
@@ -999,22 +1111,113 @@ function renderCard(s, W) {
   return out;
 }
 
-function renderHistory(rows, W) {
+// One line per list: a glyph per item (that is the "validated one by one" view),
+// the done/total ratio, then the non-terminal statuses. With --items the list is
+// expanded below, one line per item.
+function renderChecks(rail, label, list, inner) {
+  const out = [];
+  const ratioTxt = `${list.done}/${list.total} done`;
+  let budget = inner - 4 - 10 - 2 - ratioTxt.length;
+
+  let breakdown = checkBreakdown(list);
+  // Keep the breakdown only if enough room is left for a readable strip.
+  if (breakdown && budget - 3 - strip(breakdown).length >= Math.min(list.total, 6)) {
+    budget -= 3 + strip(breakdown).length;
+  } else {
+    breakdown = '';
+  }
+
+  let glyphs = '';
+  if (budget >= 2) {
+    const shown = Math.min(list.total, budget);
+    const parts = list.items.slice(0, shown).map(glyphOf);
+    if (shown < list.total) parts[parts.length - 1] = C.d + '+' + C.x;
+    glyphs = parts.join('');
+  }
+
+  out.push(
+    rail +
+      '    ' +
+      C.d +
+      pad(label, 10) +
+      C.x +
+      glyphs +
+      (glyphs ? '  ' : '') +
+      ratioTxt +
+      (breakdown ? '   ' + breakdown : '')
+  );
+
+  if (opt.items) {
+    const budgetDesc = Math.max(16, inner - 12);
+    for (const item of list.items.slice(0, MAX_ITEMS)) {
+      out.push(
+        rail +
+          '      ' +
+          glyphOf(item) +
+          ' ' +
+          pad(item.id, 2) +
+          '  ' +
+          trunc(item.description || '(no description)', budgetDesc)
+      );
+    }
+    if (list.items.length > MAX_ITEMS) {
+      out.push(rail + C.d + '      \u2026 +' + (list.items.length - MAX_ITEMS) + ' more' + C.x);
+    }
+  }
+  return out;
+}
+
+function glyphOf(item) {
+  const info = CHECK_STATUS[item.status] || { glyph: '?', color: 'd' };
+  return C[info.color] + info.glyph + C.x;
+}
+
+function checkBreakdown(list) {
+  const statuses = Object.keys(list.counts).filter((st) => list.counts[st] > 0);
+  // "8/8 done" already says everything when the only status is the happy one.
+  if (statuses.length === 1 && (statuses[0] === 'passed' || statuses[0] === 'resolved')) return '';
+  const order = ['failed', 'open', 'completed', 'passed', 'resolved', 'pending', 'dismissed'];
+  // Unknown statuses come last, under their raw name: never silently dropped.
+  for (const st of Object.keys(list.counts)) if (!order.includes(st)) order.push(st);
+  const parts = [];
+  for (const st of order) {
+    const n = list.counts[st];
+    if (!n) continue;
+    const info = CHECK_STATUS[st] || { word: st, color: 'd' };
+    parts.push(C[info.color] + `${n} ${info.word}` + C.x);
+  }
+  return parts.join(C.d + ' \u00b7 ' + C.x);
+}
+
+function checksCell(checks) {
+  if (!checks) return '\u2014';
+  const parts = [];
+  if (checks.criteria) parts.push(`${checks.criteria.done}/${checks.criteria.total}`);
+  if (checks.review_findings) parts.push(`${checks.review_findings.done}/${checks.review_findings.total}`);
+  return parts.length ? parts.join(' \u00b7 ') : '\u2014';
+}
+
+// Column set of the RECENT table, shared with the footer legend so both agree on
+// whether the CHECKS column is displayed.
+function historyCols(W) {
   const avail = W - 2;
   // Columns by priority: the optional ones are dropped when the terminal is
   // narrow, and STEP gets whatever space is left.
   const fixed = { session: 8, duration: 9 };
   const optional = [
     ['ctx', 'FINAL CONTEXT', 22, 'l'],
-    ['out', 'OUT', 6, 'r'],
+    ['checks', 'CHECKS', 13, 'l'],
     ['ended', 'ENDED', 9, 'r'],
+    ['out', 'OUT', 6, 'r'],
     ['speed', 'tok/s', 6, 'r'],
     ['model', 'MODEL', 16, 'l'],
   ];
   const chosen = [];
   let used = fixed.session + fixed.duration;
   for (const [key, name, w, align] of optional) {
-    if (used + w + 2 * (chosen.length + 3) + 14 > avail) continue;
+    // Keep at least 20 columns for STEP: it is the column that says what the
+    // session did, and squeezing it below that makes the row unreadable.
+    if (used + w + 2 * (chosen.length + 3) + 20 > avail) continue;
     chosen.push([key, name, w, align]);
     used += w;
   }
@@ -1023,10 +1226,15 @@ function renderHistory(rows, W) {
     ['step', 'STEP', Math.max(14, avail - used - 2 * (chosen.length + 2)), 'l'],
     ['duration', 'DURATION', fixed.duration, 'l'],
     // Selected by priority above, displayed in a stable reading order.
-    ...['ctx', 'out', 'speed', 'model', 'ended']
+    ...['ctx', 'out', 'speed', 'checks', 'model', 'ended']
       .map((key) => chosen.find((c) => c[0] === key))
       .filter(Boolean),
   ];
+  return cols;
+}
+
+function renderHistory(rows, W) {
+  const cols = historyCols(W);
   const w = cols.map((c) => c[2]);
 
   const out = [];
@@ -1056,6 +1264,7 @@ function renderHistory(rows, W) {
           : '\u2014',
       ended: fmtAge(s.endedMs),
       out: s.tokOut != null ? fmtK(s.tokOut) : '\u2014',
+      checks: checksCell(s.checks),
       speed: s.speed != null ? s.speed.toFixed(1) : '\u2014',
       model: modelIdx >= 0 ? trunc(s.model, w[modelIdx]) : '',
     };

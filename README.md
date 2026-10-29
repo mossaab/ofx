@@ -148,6 +148,7 @@ finished sessions (duration, final step, final context size, outcome).
 ofx live                 # every 2 s, until Ctrl+C
 ofx live --interval 1    # faster samples
 ofx live --min 0         # running sessions only
+ofx live --items         # expand criteria and findings, one line each
 ofx live --once          # one screen, for a log
 ```
 
@@ -156,6 +157,31 @@ sample**: a dashboard left open for hours never pins a WAL read snapshot, so it 
 delays a checkpoint. A sample was measured at **2–10 ms** on a 1.4 GB database — the
 lag is accounted incrementally and `turn.snapshot` payloads are never parsed in the
 loop.
+
+#### Acceptance criteria and review findings
+
+OpenFox writes the build acceptance criteria and the review findings as `metadata.set`
+events (keys `criteria` and `review_findings`), rewriting the whole list each time one
+point changes. They survive `cleanupOldEvents()`, so they are visible for finished
+sessions too. `ofx live` shows one glyph per point, i.e. the list exactly as it is
+validated, one item at a time:
+
+```
+  ▌     criteria  ✓✓◐✗··✓◐  4/8 done   1 failed · 2 in progress · 3 passed · 2 pending
+  ▌     review    ✓○–        2/3 done   1 open · 1 resolved · 1 dismissed
+```
+
+| Status | Glyph | Meaning |
+|---|---|---|
+| `pending` | `·` | not started |
+| `completed` | `◐` | implemented, not verified yet |
+| `passed` / `failed` | `✓` / `✗` | verified during the review |
+| `open` | `○` | review finding not addressed |
+| `resolved` / `dismissed` | `✓` / `–` | finding closed |
+
+`ofx live --items` expands each list, one line per point with its id and description.
+The finished-session table gets a `CHECKS` column (`criteria · findings` ratios) when
+the terminal is wide enough.
 
 Two limits come from OpenFox's own data model, and `ofx live` states them instead of
 inventing numbers: `sessions.total_tokens_used` is not maintained (0 on every
