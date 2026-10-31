@@ -11,6 +11,8 @@
 // snapshot and never delays a checkpoint.
 //
 // WHAT IS DELIBERATELY *NOT* DONE ON EVERY SAMPLE (the whole point):
+//   - no extra sample to animate a blocked session: the blink redraws the frame
+//     from the model already in memory (see PENDING_TYPES below);
 //   - no SUM(LENGTH(payload)) over the table: lag is measured once per session,
 //     then updated incrementally with the events that arrived since the previous
 //     sample (full resync every RESYNC_EVERY samples, in case of a gap);
@@ -63,8 +65,15 @@ const STALE_MS = 5 * 60 * 1000;
 const LAG_MB_WARN = Number(process.env.OPENFOX_WD_LAG_MB_WARN || 20);
 const LAG_MB_CRIT = Number(process.env.OPENFOX_WD_LAG_MB_CRIT || 100);
 
-// A session waiting for a human: the very last event is one of these.
-const WAITING_TYPES = ['chat.ask_user', 'path.confirmation_pending'];
+// A session blocked on a human: the very last event says so. OpenFox journals a
+// question as chat.ask_user immediately followed by a chat.done whose reason is
+// "waiting_for_user" (same millisecond, e.g. seq 11617 then 11618 in a real
+// journal), so testing the event type alone would never see a question: the
+// chat.done reason is part of the rule, not a fallback.
+const PENDING_TYPES = {
+  'chat.ask_user': 'question',
+  'path.confirmation_pending': 'access',
+};
 
 // Acceptance criteria and review findings are not dedicated event types: OpenFox
 // stores them in metadata.set with these two keys, rewriting the whole list every
@@ -244,6 +253,14 @@ function printHelp() {
                    line, instead of only their progress summary
     --no-color     disable colors (also honors NO_COLOR and a non-TTY stdout)
 
+  A session blocked on a human is listed first and flagged in red: a question
+  (chat.ask_user, or the chat.done "waiting_for_user" that follows it) and an
+  access request (path.confirmation_pending) both turn the badge into a blinking
+  WAITING, and the second line says what is awaited: "waiting 12s · question" or
+  "waiting 12s · access". The glyph pulses during the first minute, then the card
+  stays red and static. The blink redraws the frame already in memory, it never
+  costs an extra sample, and it is disabled when stdout is not a color terminal.
+
   READ-ONLY. The database is opened readonly + query_only and closed again after
   every sample. Nothing is written, no WAL read snapshot is held.
 
@@ -353,6 +370,34 @@ function lastEvents(db, ids) {
       e.mx = r.seq;
     }
   }
+  return out;
+}
+
+// Why the last event blocks the session on a human: null | 'question' | 'access'.
+// Single source of truth for the sample() classification and the card badge, so
+// the two can never disagree. `doneReason` is only read when the last event is a
+// chat.done (the question case); path.confirmation_responded clears the wait.
+function pendingOf(le, doneReason) {
+  if (!le) return null;
+  const direct = PENDING_TYPES[le.type];
+  if (direct) return direct;
+  if (le.type === 'chat.done' && doneReason === 'waiting_for_user') return 'question';
+  return null;
+}
+
+// Reason of the last event, only for the sessions whose last event is a chat.done.
+// json_extract keeps it to a few bytes, and the query is set-based: no payload is
+// read for a session that is busy generating.
+function lastDoneReasons(db, last) {
+  const out = new Map();
+  const pairs = [];
+  for (const [id, v] of last) if (v.type === 'chat.done') pairs.push([id, v.mx]);
+  if (!pairs.length) return out;
+  const cond = pairs.map(() => '(session_id = ? AND seq = ?)').join(' OR ');
+  const rows = db
+    .prepare(`SELECT session_id, json_extract(payload, '$.reason') AS reason FROM events WHERE ${cond}`)
+    .all(...pairs.flat());
+  for (const r of rows) out.set(r.session_id, r.reason);
   return out;
 }
 
@@ -578,15 +623,17 @@ function sample(state) {
       .all();
 
     const lastRunning = lastEvents(db, running.map((s) => s.id));
+    const doneReasons = lastDoneReasons(db, lastRunning);
     const active = [];
     const stalled = [];
     for (const s of running) {
       const le = lastRunning.get(s.id) || null;
       const idleMs = le ? now - le.ts : Infinity;
-      const rec = { ...s, le, idleMs };
       // A session that asked a question is WAITING, not a ghost: the turn is
       // blocked on a human, which is exactly what the operator needs to see.
-      if (le && WAITING_TYPES.includes(le.type)) {
+      const pending = pendingOf(le, doneReasons.get(s.id));
+      const rec = { ...s, le, idleMs, pending };
+      if (pending) {
         rec.live = 'waiting';
         active.push(rec);
       } else if (idleMs > STALE_MS) {
@@ -631,7 +678,10 @@ function sample(state) {
       now,
       width: Math.max(60, Math.min(Number(process.stdout.columns) || 100, MAX_WIDTH)),
       interval: opt.interval,
-      active: rows.filter((r) => r.kind === 'active' && r.live !== 'stalled'),
+      // A blocked session is the only thing that needs a human: it goes first.
+      active: rows
+        .filter((r) => r.kind === 'active' && r.live !== 'stalled')
+        .sort((a, b) => (a.live === 'waiting' ? 0 : 1) - (b.live === 'waiting' ? 0 : 1)),
       stalled: rows.filter((r) => r.live === 'stalled'),
       history: rows.filter((r) => r.kind === 'history'),
       db: statOr(DB_PATH, 0),
@@ -773,6 +823,9 @@ function buildSession(db, s, shared, kind) {
     phase: phaseObj ? phaseObj.phase : null,
     duration,
     idleMs,
+    // Timestamp of the last event: the "waiting Ns" counter is recomputed from
+    // it on every redraw, so it keeps counting between two samples.
+    pendingSince: le ? le.ts : null,
     ctx,
     checks: checksOf(db, s.id, shared.meta.get(s.id) || 0),
     live: kind === 'history' ? 'finished' : null,
@@ -809,6 +862,9 @@ function buildSession(db, s, shared, kind) {
     (d.get('chat.error') || {}).timestamp || 0
   );
   const t = tokensOf(db, s.id, le ? le.mx : 0);
+  // sample() is the only place that decides whether a session is blocked (one
+  // helper, one rule); buildSession only renders that verdict.
+  const pending = s.pending || null;
 
   const prevSeq = m.lastSeq || 0;
   const dtSec = m.prevTs ? (shared.now - m.prevTs) / 1000 : 0;
@@ -866,12 +922,8 @@ function buildSession(db, s, shared, kind) {
   }
 
   Object.assign(base, {
-    live:
-      s.live === 'stalled'
-        ? 'stalled'
-        : le && WAITING_TYPES.includes(le.type)
-          ? 'waiting'
-          : 'running',
+    live: s.live === 'stalled' ? 'stalled' : pending ? 'waiting' : 'running',
+    pending,
     turnMs: turnStart ? shared.now - turnStart : null,
     ctx: ctx || snapshotContext(db, s.id, snap ? snap.seq : null),
     speedLast: t.lastSpeed,
@@ -908,7 +960,7 @@ function countLag(db, id, snapSeq) {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
-function render(model) {
+function render(model, blink) {
   const W = model.width;
   const lines = [];
 
@@ -920,9 +972,12 @@ function render(model) {
   lines.push(C.d + '\u250c ' + left + ' ' + '\u2500'.repeat(dash) + ' ' + right + ' \u2510' + C.x);
 
   const badge = (n, label, color) => color + n + ' ' + label + C.x;
+  const waitingN = model.active.filter((s) => s.live === 'waiting').length;
+  // A blocked session is an alert: the counter turns red and pulses with the
+  // cards. Zero waiting stays dim, so red keeps meaning "someone waits for you".
   const counts = [
     badge(model.active.length, 'active', C.g),
-    badge(model.active.filter((s) => s.live === 'waiting').length, 'waiting', C.y),
+    badge(waitingN, 'waiting', waitingN ? (blink ? C.r + C.b : C.r) : C.d),
     badge(model.stalled.length, 'stalled', C.r),
   ].join('   ');
   const healthParts = [
@@ -954,7 +1009,7 @@ function render(model) {
   if (!cards.length) {
     lines.push('  ' + C.d + 'no session is running right now' + C.x);
   } else {
-    for (const s of cards) lines.push(...renderCard(s, W));
+    for (const s of cards) lines.push(...renderCard(s, W, blink, model.now));
   }
 
   // --- history ------------------------------------------------------------
@@ -997,15 +1052,18 @@ function render(model) {
 // before a trailing ANSI reset (redirected output must stay clean).
 const trimEnd = (s) => s.replace(/[ \t]+(\u001b\[0m)?$/, '$1');
 
-function stateBadge(s) {
+function stateBadge(s, blink) {
   if (s.live === 'running') return { icon: '\u25cf', word: 'RUNNING', color: C.g };
-  if (s.live === 'waiting') return { icon: '\u25c6', word: 'WAITING', color: C.y };
+  // The glyph pulses (filled / hollow) so the eye catches it without the word
+  // flickering: WAITING stays readable on both phases. Red, never yellow.
+  if (s.live === 'waiting')
+    return { icon: blink ? '\u25c6' : '\u25c7', word: 'WAITING', color: blink ? C.r + C.b : C.r };
   if (s.live === 'stalled') return { icon: '\u25b2', word: 'STALLED', color: C.r };
   return { icon: '\u25cb', word: 'FINISHED', color: C.d };
 }
 
-function renderCard(s, W) {
-  const b = stateBadge(s);
+function renderCard(s, W, blink, now) {
+  const b = stateBadge(s, blink);
   const rail = '  ' + b.color + '\u258c' + C.x + ' ';
   const inner = W - 4;
   const out = [];
@@ -1024,18 +1082,25 @@ function renderCard(s, W) {
   out.push(rail + rowOf(head, showModel ? C.d + trunc(s.model, 18) + C.x : '', inner));
 
   // line 2: step + phase, then elapsed
+  // What is blocking the session, so the operator knows where to click: a
+  // question in the chat or an access request on a path.
+  const pendingWord = s.pending === 'access' ? 'access' : s.pending === 'question' ? 'question' : null;
+  // Measured against the render clock, not the sample clock: the badge blinks
+  // between two samples, and a frozen "waiting 23s" would be the one number that
+  // matters most and never moves.
+  const idleMs = s.live === 'waiting' && s.pendingSince != null ? now - s.pendingSince : s.idleMs;
   const whenPlain =
     s.live === 'waiting'
-      ? `waiting ${fmtDur(s.idleMs)}`
+      ? `waiting ${fmtDur(idleMs)}${pendingWord ? ' \u00b7 ' + pendingWord : ''}`
       : s.live === 'stalled'
-        ? `no event for ${fmtDur(s.idleMs)}`
+        ? `no event for ${fmtDur(idleMs)}`
         : `since ${fmtDur(s.turnMs)}`;
   const phasePlain = s.phase && s.phase !== s.step ? ' \u00b7 ' + s.phase : '';
   const stepBudget = Math.max(10, inner - 4 - whenPlain.length - phasePlain.length - 2);
   const stepTxt = s.step ? C.c + trunc(s.step, stepBudget) + C.x : C.d + 'no workflow step' + C.x;
   const phaseTxt = phasePlain ? C.d + phasePlain + C.x : '';
   const when =
-    s.live === 'waiting' ? C.y + whenPlain + C.x : s.live === 'stalled' ? C.r + whenPlain + C.x : C.d + whenPlain + C.x;
+    s.live === 'waiting' ? C.r + whenPlain + C.x : s.live === 'stalled' ? C.r + whenPlain + C.x : C.d + whenPlain + C.x;
   out.push(rail + rowOf('    ' + stepTxt + phaseTxt, when, inner));
 
   if (s.live === 'stalled') {
@@ -1090,7 +1155,11 @@ function renderCard(s, W) {
       `prompt ${fmtK(s.tokIn)} (${cachedPct}% cached) \u00b7 out ${fmtK(s.tokOut)}`;
     out.push(rail + '    ' + C.d + pad('tokens', 10) + C.x + txt);
   } else {
-    out.push(rail + '    ' + C.d + pad('tokens', 10) + 'awaiting first chat.done' + C.x);
+    // The chat.done that follows a question carries no usage: on a waiting card
+    // "awaiting first chat.done" would read as a contradiction, so show nothing
+    // rather than something false.
+    const txt = s.live === 'waiting' ? '\u2014' : 'awaiting first chat.done';
+    out.push(rail + '    ' + C.d + pad('tokens', 10) + txt + C.x);
   }
 
   // lag
@@ -1281,30 +1350,65 @@ function renderHistory(rows, W) {
 // ---------------------------------------------------------------------------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A blocked session blinks without costing a sample: the frame is redrawn from
+// the model already in memory every BLINK_MS while somebody waits, and the
+// database is still opened once per --interval (no extra query, no WAL snapshot).
+const BLINK_MS = 500;
+// The pulse is bounded: past this age the card stays red and first in the list
+// but stops animating, so an abandoned question (or a session whose process died
+// while a question was pending) cannot keep a 2 Hz full-screen redraw running.
+const BLINK_MAX_MS = 60 * 1000;
+
 async function main() {
   const state = { tick: 0 };
   let n = 0;
+  let model = null;
+  let dueAt = 0;
+  let phase = true;
   hideCursor();
   for (;;) {
-    let model;
-    try {
-      model = sample(state);
-    } catch (e) {
-      showCursor();
-      console.error('  \u2717 sampling failed: ' + (e && e.message ? e.message : e));
-      process.exit(2);
+    let fresh = false;
+    if (!model || Date.now() >= dueAt) {
+      try {
+        model = sample(state);
+      } catch (e) {
+        showCursor();
+        console.error('  \u2717 sampling failed: ' + (e && e.message ? e.message : e));
+        process.exit(2);
+      }
+      dueAt = Date.now() + opt.interval * 1000;
+      fresh = true;
     }
-    const frame = render(model);
-    if (IS_TTY) {
-      process.stdout.write('\u001b[2J\u001b[H' + frame);
+    // Only a color terminal animates: a redirected frame must stay byte-stable,
+    // so it is always drawn on the "on" phase (WAITING + question/access). The
+    // TTY test is explicit, not implied by useColor.
+    const drawnAt = Date.now();
+    const pulsing =
+      IS_TTY &&
+      useColor &&
+      model.active.some(
+        (s) => s.live === 'waiting' && s.pendingSince != null && drawnAt - s.pendingSince < BLINK_MAX_MS
+      );
+    if (fresh) {
+      if (IS_TTY) {
+        process.stdout.write('\u001b[2J\u001b[H' + render(model, pulsing ? phase : true));
+      } else {
+        if (n > 0) process.stdout.write('\n');
+        process.stdout.write(`# ${new Date(model.now).toISOString()}  every ${opt.interval}s\n`);
+        process.stdout.write(render(model, true));
+      }
+      n++;
+      if (opt.samples && n >= opt.samples) break;
     } else {
-      if (n > 0) process.stdout.write('\n');
-      process.stdout.write(`# ${new Date(model.now).toISOString()}  every ${opt.interval}s\n`);
-      process.stdout.write(frame);
+      // Blink tick: same model, fresh clock, no database access at all.
+      process.stdout.write('\u001b[2J\u001b[H' + render({ ...model, now: Date.now() }, phase));
     }
-    n++;
-    if (opt.samples && n >= opt.samples) break;
-    await sleep(opt.interval * 1000);
+    if (!pulsing) {
+      await sleep(Math.max(50, dueAt - Date.now()));
+      continue;
+    }
+    phase = !phase;
+    await sleep(Math.min(BLINK_MS, Math.max(50, dueAt - Date.now())));
   }
   showCursor();
 }

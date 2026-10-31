@@ -158,6 +158,34 @@ delays a checkpoint. A sample was measured at **2–10 ms** on a 1.4 GB database
 lag is accounted incrementally and `turn.snapshot` payloads are never parsed in the
 loop.
 
+#### A session waiting for you
+
+A session blocked on a human is the one thing the dashboard must not let you miss: it
+is listed **first**, its rail and badge turn **red**, the glyph alternates between `◆`
+and `◇` every 500 ms, and the second line says what is awaited. The pulse is bounded to
+the first minute — an older wait stays red and static, so an abandoned question (or a
+session whose process died while a question was pending) cannot animate the screen
+forever, and the `waiting Ns` counter keeps counting between two samples.
+
+```
+  ▌ ◆ WAITING  3f2c1a9e  Fix the login redirect
+  ▌     Build & Verify › Implement · build                        waiting 12s · question
+  ▌ ◆ WAITING  7b4d0c21  Add the CSV export
+  ▌     Build & Verify › Finalize · verification                  waiting 4s · access
+```
+
+| Last event | Meaning |
+|---|---|
+| `chat.done` with reason `waiting_for_user` | a question is pending — OpenFox writes it immediately after `chat.ask_user`, so this is the state that is actually observable |
+| `chat.ask_user` | a question is pending, in the instant before that `chat.done` |
+| `path.confirmation_pending` | an access request on a path, waiting for approval |
+| `path.confirmation_responded` | answered — no longer waiting |
+
+The blink redraws the frame already in memory: the sample cadence, and the single
+database open/close per sample, are unchanged. It is disabled when stdout is not a
+color terminal (`--no-color`, `NO_COLOR`, redirected output), which always gets the
+"on" phase — a logged sample stays stable and grep-able.
+
 #### Acceptance criteria and review findings
 
 OpenFox writes the build acceptance criteria and the review findings as `metadata.set`
