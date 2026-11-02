@@ -3,7 +3,8 @@
 //
 // One screen: the sessions that are running right now (step, elapsed time, token
 // speed, tokens used, context occupancy, snapshot lag) and, when fewer than --min
-// are active, the most recently finished sessions that fill the gap.
+// are active, the most recently finished sessions that fill the gap (two by
+// default: RECENT is a reminder of what just ended, not a history browser).
 //
 // READ-ONLY: the database is opened readonly + query_only, /proc is read for the
 // server CPU/RSS, nothing is written anywhere. The connection is opened AND CLOSED
@@ -106,13 +107,19 @@ const DETAIL_TYPES = [
 
 const RESYNC_EVERY = 30; // samples between two full lag recomputations
 const SPARK_LEN = 24; // samples kept for the speed sparkline
-const MAX_WIDTH = 140;
+// The frame follows the terminal width (see sample()): there is no upper cap, so
+// a wide terminal gets a wide dashboard — the RECENT table gains columns and a
+// wider STEP — instead of a block floating in empty space.
 
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2);
-const opt = { interval: 2, min: 5, samples: 0, color: true, items: false };
+// min is the number of rows the screen fills up to: when fewer sessions are
+// running, the most recently finished ones complete it. The default is 2 so the
+// RECENT table never grows past two finished sessions — it is a reminder of what
+// just ended, not a history browser (`ofx list` is).
+const opt = { interval: 2, min: 2, samples: 0, color: true, items: false };
 
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -245,8 +252,8 @@ function printHelp() {
 
   OPTIONS
     --interval N   seconds between two samples (default 2, minimum 1)
-    --min N        fill up to N active sessions with the most recently finished
-                   ones (default 5, 0 disables the historical block)
+    --min N        fill up to N sessions with the most recently finished ones
+                   (default 2, 0 disables the historical block)
     --samples N    stop after N samples (0 = until Ctrl+C)
     --once         one sample, then exit
     --items        list the acceptance criteria and review findings, one per
@@ -611,6 +618,11 @@ function parseCheckList(payload) {
 function sample(state) {
   const db = openDb();
   const now = Date.now();
+  // The terminal width is read once per sample, so a resized window is followed
+  // on the next sample. 60 columns is the floor: below that every card is
+  // unreadable, and a terminal still narrower gets a horizontal scroll rather
+  // than a pile of truncated labels.
+  const columns = Number(process.stdout.columns) || 100;
   state.tick++;
 
   try {
@@ -676,7 +688,7 @@ function sample(state) {
 
     return {
       now,
-      width: Math.max(60, Math.min(Number(process.stdout.columns) || 100, MAX_WIDTH)),
+      width: Math.max(60, columns),
       interval: opt.interval,
       // A blocked session is the only thing that needs a human: it goes first.
       active: rows
@@ -968,7 +980,11 @@ function render(model, blink) {
   const inner = W - 4;
   const left = 'ofx live';
   const right = `${clock(model.now)} \u00b7 every ${model.interval}s`;
-  const dash = Math.max(1, W - 5 - left.length - right.length);
+  // '┌ ' + left + ' ' + dash + ' ' + right + ' ┐' must total exactly W: the five
+  // one-column corners/separators plus the two spaces around the dash run. One
+  // column too many and the ┐ wraps (or, on a wider terminal, sits outside the
+  // box) — the frame then looks broken on a wide screen.
+  const dash = Math.max(1, W - 6 - left.length - right.length);
   lines.push(C.d + '\u250c ' + left + ' ' + '\u2500'.repeat(dash) + ' ' + right + ' \u2510' + C.x);
 
   const badge = (n, label, color) => color + n + ' ' + label + C.x;
@@ -1307,7 +1323,7 @@ function renderHistory(rows, W) {
   const w = cols.map((c) => c[2]);
 
   const out = [];
-  const header = cols.map(([key, name, width, align]) => (align === 'r' ? padL(name, width) : pad(name, width))).join('  ');
+  const header = cols.map(([, name, width, align]) => (align === 'r' ? padL(name, width) : pad(name, width))).join('  ');
   out.push('  ' + C.d + pad(header, W - 2) + C.x);
   out.push('  ' + C.d + '\u2500'.repeat(W - 2) + C.x);
 

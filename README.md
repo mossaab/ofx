@@ -141,8 +141,8 @@ ofx compact --hot --apply --restart
 
 `ofx live` draws the sessions that are running right now — one card each: workflow
 step, elapsed time, context occupancy, token speed, tokens used and snapshot lag —
-and, when fewer than five are active, fills the screen with the most recently
-finished sessions (duration, final step, final context size, outcome).
+and, when fewer than two are active, fills the screen with up to two of the most
+recently finished sessions (duration, final step, final context size, outcome).
 
 ```bash
 ofx live                 # every 2 s, until Ctrl+C
@@ -157,6 +157,11 @@ sample**: a dashboard left open for hours never pins a WAL read snapshot, so it 
 delays a checkpoint. A sample was measured at **2–10 ms** on a 1.4 GB database — the
 lag is accounted incrementally and `turn.snapshot` payloads are never parsed in the
 loop.
+
+The frame follows the terminal width — there is no upper cap, so a wide terminal gets
+a wide dashboard: the RECENT table gains columns and a wider `STEP`. The width is
+re-read on every sample, so resizing the window is picked up on the next one, and 60
+columns is the floor below which the cards cannot stay readable.
 
 #### A session waiting for you
 
